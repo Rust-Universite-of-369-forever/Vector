@@ -10,7 +10,6 @@ import {
   updateProfile
 } from 'firebase/auth'
 
-/* ========== Storage (localStorage, привязан к uid) ========== */
 function storageKey(base, uid) {
   return uid ? `vector_${base}_${uid}` : `vector_${base}`
 }
@@ -20,9 +19,7 @@ const Storage = {
     try {
       const raw = localStorage.getItem(key)
       return raw ? JSON.parse(raw) : fallback
-    } catch {
-      return fallback
-    }
+    } catch { return fallback }
   },
   set(key, value) {
     localStorage.setItem(key, JSON.stringify(value))
@@ -32,21 +29,28 @@ const Storage = {
 let currentUser = null
 let currentPage = 'home'
 
-/* ========== Helpers ========== */
 const today = () => new Date().toISOString().slice(0, 10)
-
-function uid() {
-  return currentUser?.uid || null
+function daysAgo(n) {
+  const d = new Date()
+  d.setDate(d.getDate() - n)
+  return d.toISOString().slice(0, 10)
 }
+function lastNDays(n) {
+  const days = []
+  for (let i = n - 1; i >= 0; i--) days.push(daysAgo(i))
+  return days
+}
+function uid() { return currentUser?.uid || null }
 
 function getProfile() {
   return Storage.get(storageKey('profile', uid()), {
     name: currentUser?.displayName || 'Друг',
     level: 'Новичок',
-    createdAt: new Date().toISOString()
+    points: 0,
+    createdAt: new Date().toISOString(),
+    lastActiveDay: null
   })
 }
-
 function saveProfile(p) { Storage.set(storageKey('profile', uid()), p) }
 function getHabits() { return Storage.get(storageKey('habits', uid()), []) }
 function saveHabits(h) { Storage.set(storageKey('habits', uid()), h) }
@@ -55,7 +59,49 @@ function saveGoals(g) { Storage.set(storageKey('goals', uid()), g) }
 function getJournal() { return Storage.get(storageKey('journal', uid()), []) }
 function saveJournal(j) { Storage.set(storageKey('journal', uid()), j) }
 
-function calcStreak(habit) {
+/** Active goals only (not completed, not soft-deleted) */
+function getActiveGoals() {
+  return getGoals().filter(g => !g.completed && !g.deleted)
+}
+/** Soft-deleted goals (can restore) — only last few */
+function getDeletedGoals() {
+  return getGoals().filter(g => g.deleted && !g.completed)
+}
+/** Completed goals (for stats only, not shown in list) */
+function getCompletedGoals() {
+  return getGoals().filter(g => g.completed)
+}
+
+function getActiveDays() {
+  const set = new Set()
+  getHabits().forEach(h => (h.history || []).forEach(d => set.add(d)))
+  getJournal().forEach(e => set.add(e.date.slice(0, 10)))
+  getCompletedGoals().forEach(g => {
+    if (g.completedAt) set.add(g.completedAt.slice(0, 10))
+  })
+  return set
+}
+
+function getOverallStreak() {
+  const allDays = getActiveDays()
+  if (allDays.size === 0) return 0
+  let streak = 0
+  let expected = today()
+  if (!allDays.has(expected)) {
+    const y = daysAgo(1)
+    if (!allDays.has(y)) return 0
+    expected = y
+  }
+  while (allDays.has(expected)) {
+    streak++
+    const d = new Date(expected)
+    d.setDate(d.getDate() - 1)
+    expected = d.toISOString().slice(0, 10)
+  }
+  return streak
+}
+
+function calcHabitStreak(habit) {
   if (!habit.history?.length) return 0
   const sorted = [...habit.history].sort().reverse()
   let streak = 0
@@ -71,17 +117,59 @@ function calcStreak(habit) {
   return streak
 }
 
-function calcLevel() {
-  const habits = getHabits()
-  const goals = getGoals()
-  const journal = getJournal()
-  const maxStreak = habits.reduce((m, h) => Math.max(m, calcStreak(h)), 0)
-  const completed = goals.filter(g => g.completed).length
-  const score = maxStreak * 2 + completed * 3 + journal.length
-  if (score >= 40) return 'Мастер'
-  if (score >= 20) return 'Практик'
-  if (score >= 8) return 'Исследователь'
+function awardDailyActivity(points = 10) {
+  const profile = getProfile()
+  const t = today()
+  if (profile.lastActiveDay === t) {
+    profile.points = (profile.points || 0) + Math.floor(points / 2)
+  } else {
+    profile.points = (profile.points || 0) + points
+    profile.lastActiveDay = t
+  }
+  profile.level = calcLevel(profile.points)
+  saveProfile(profile)
+  return profile.points
+}
+
+function calcLevel(points) {
+  const p = points ?? getProfile().points ?? 0
+  if (p >= 500) return 'Мастер'
+  if (p >= 200) return 'Практик'
+  if (p >= 50) return 'Исследователь'
   return 'Новичок'
+}
+
+function getAchievements() {
+  const streak = getOverallStreak()
+  const habits = getHabits()
+  const goalsDone = getCompletedGoals().length
+  const journal = getJournal()
+  const totalChecks = habits.reduce((s, h) => s + (h.history?.length || 0), 0)
+  const points = getProfile().points || 0
+  return [
+    { id: 'first', icon: '🌱', title: 'Первый шаг', earned: totalChecks + journal.length + goalsDone > 0 },
+    { id: 's3', icon: '🔥', title: '3 дня подряд', earned: streak >= 3 },
+    { id: 's7', icon: '🔥', title: 'Неделя', earned: streak >= 7 },
+    { id: 's30', icon: '💎', title: 'Месяц', earned: streak >= 30 },
+    { id: 'h10', icon: '✅', title: '10 отметок', earned: totalChecks >= 10 },
+    { id: 'h50', icon: '🏆', title: '50 отметок', earned: totalChecks >= 50 },
+    { id: 'g1', icon: '🎯', title: 'Первая цель', earned: goalsDone >= 1 },
+    { id: 'g5', icon: '🌟', title: '5 целей', earned: goalsDone >= 5 },
+    { id: 'j7', icon: '📓', title: 'Неделя дневника', earned: journal.length >= 7 },
+    { id: 'p100', icon: '⭐', title: '100 очков', earned: points >= 100 }
+  ]
+}
+
+function daysWithVector() {
+  const profile = getProfile()
+  if (!profile.createdAt) return 1
+  const diff = Math.floor((Date.now() - new Date(profile.createdAt)) / 86400000)
+  return Math.max(1, diff + 1)
+}
+
+function totalActions() {
+  const checks = getHabits().reduce((s, h) => s + (h.history?.length || 0), 0)
+  return checks + getCompletedGoals().length + getJournal().length
 }
 
 function escapeHtml(text) {
@@ -100,10 +188,10 @@ function showToast(msg) {
   t.textContent = msg
   t.classList.add('show')
   clearTimeout(t._timer)
-  t._timer = setTimeout(() => t.classList.remove('show'), 2200)
+  t._timer = setTimeout(() => t.classList.remove('show'), 2400)
 }
 
-/* ========== Auth UI ========== */
+/* ========== Auth ========== */
 function renderAuth(mode = 'login') {
   const app = document.getElementById('app')
   app.innerHTML = `
@@ -111,123 +199,69 @@ function renderAuth(mode = 'login') {
       <div class="auth-card">
         <div class="auth-logo">Vector<span>.</span></div>
         <p class="auth-subtitle">Спокойный путь к лучшей версии себя</p>
-
         <div class="auth-tabs">
           <button class="${mode === 'login' ? 'active' : ''}" data-mode="login">Вход</button>
           <button class="${mode === 'register' ? 'active' : ''}" data-mode="register">Регистрация</button>
         </div>
-
         <div class="auth-error" id="auth-error"></div>
-
-        <div class="auth-field">
-          <label>Email</label>
-          <input type="email" id="auth-email" class="input" placeholder="you@example.com" autocomplete="email">
-        </div>
-
-        <div class="auth-field">
-          <label>Пароль</label>
-          <input type="password" id="auth-password" class="input" placeholder="Минимум 6 символов" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}">
-        </div>
-
-        ${mode === 'register' ? `
-          <div class="auth-field">
-            <label>Имя</label>
-            <input type="text" id="auth-name" class="input" placeholder="Как к тебе обращаться?">
-          </div>
-        ` : ''}
-
-        <button class="btn auth-submit" id="auth-submit">
-          ${mode === 'login' ? 'Войти' : 'Создать аккаунт'}
-        </button>
-
+        <div class="auth-field"><label>Email</label>
+          <input type="email" id="auth-email" class="input" placeholder="you@example.com"></div>
+        <div class="auth-field"><label>Пароль</label>
+          <input type="password" id="auth-password" class="input" placeholder="Минимум 6 символов"></div>
+        ${mode === 'register' ? `<div class="auth-field"><label>Имя</label>
+          <input type="text" id="auth-name" class="input" placeholder="Как к тебе обращаться?"></div>` : ''}
+        <button class="btn auth-submit" id="auth-submit">${mode === 'login' ? 'Войти' : 'Создать аккаунт'}</button>
         <div class="auth-divider">или</div>
-
-        <button class="btn btn-google" id="auth-google">
-          <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3 0 5.8 1.1 7.9 3l5.7-5.7C34.2 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.5-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3 0 5.8 1.1 7.9 3l5.7-5.7C34.2 6.1 29.3 4 24 4 16.3 4 9.6 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.3 35.5 26.8 36 24 36c-5.3 0-9.7-3.3-11.3-8H6.3C9.6 39.7 16.3 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-1.1 3.2-3.5 5.7-6.5 7.1l6.2 5.2C38.5 37.2 44 31.5 44 24c0-1.3-.1-2.5-.4-3.5z"/></svg>
-          Войти через Google
-        </button>
+        <button class="btn btn-google" id="auth-google">Войти через Google</button>
       </div>
-    </div>
-  `
+    </div>`
 
-  // Tabs
   app.querySelectorAll('[data-mode]').forEach(btn => {
     btn.addEventListener('click', () => renderAuth(btn.dataset.mode))
   })
-
   const errorEl = document.getElementById('auth-error')
-  const showError = (msg) => {
-    errorEl.textContent = msg
-    errorEl.classList.add('show')
-  }
+  const showError = (msg) => { errorEl.textContent = msg; errorEl.classList.add('show') }
 
-  // Email submit
   document.getElementById('auth-submit').addEventListener('click', async () => {
     const email = document.getElementById('auth-email').value.trim()
     const password = document.getElementById('auth-password').value
-    const submitBtn = document.getElementById('auth-submit')
-
-    if (!email || !password) {
-      showError('Заполни email и пароль')
-      return
-    }
-    if (password.length < 6) {
-      showError('Пароль должен быть не короче 6 символов')
-      return
-    }
-
-    submitBtn.disabled = true
-    submitBtn.textContent = 'Подождите…'
+    const btn = document.getElementById('auth-submit')
+    if (!email || !password) { showError('Заполни email и пароль'); return }
+    if (password.length < 6) { showError('Пароль не короче 6 символов'); return }
+    btn.disabled = true
+    btn.textContent = 'Подождите…'
     errorEl.classList.remove('show')
-
     try {
-      if (mode === 'login') {
-        await signInWithEmailAndPassword(auth, email, password)
-      } else {
+      if (mode === 'login') await signInWithEmailAndPassword(auth, email, password)
+      else {
         const name = document.getElementById('auth-name')?.value.trim() || 'Друг'
         const cred = await createUserWithEmailAndPassword(auth, email, password)
         await updateProfile(cred.user, { displayName: name })
       }
-      // onAuthStateChanged подхватит
     } catch (err) {
       const map = {
-        'auth/user-not-found': 'Пользователь не найден',
-        'auth/wrong-password': 'Неверный пароль',
         'auth/invalid-credential': 'Неверный email или пароль',
-        'auth/email-already-in-use': 'Этот email уже зарегистрирован',
-        'auth/weak-password': 'Пароль слишком простой',
-        'auth/invalid-email': 'Некорректный email',
-        'auth/too-many-requests': 'Слишком много попыток. Попробуй позже'
+        'auth/email-already-in-use': 'Email уже зарегистрирован',
+        'auth/configuration-not-found': 'Включи Email/Password в Firebase'
       }
-      showError(map[err.code] || err.message || 'Ошибка входа')
-      submitBtn.disabled = false
-      submitBtn.textContent = mode === 'login' ? 'Войти' : 'Создать аккаунт'
+      showError(map[err.code] || err.message || 'Ошибка')
+      btn.disabled = false
+      btn.textContent = mode === 'login' ? 'Войти' : 'Создать аккаунт'
     }
   })
-
-  // Google
   document.getElementById('auth-google').addEventListener('click', async () => {
-    try {
-      const provider = new GoogleAuthProvider()
-      await signInWithPopup(auth, provider)
-    } catch (err) {
-      if (err.code !== 'auth/popup-closed-by-user') {
-        showError(err.message || 'Ошибка входа через Google')
-      }
-    }
+    try { await signInWithPopup(auth, new GoogleAuthProvider()) }
+    catch (err) { if (err.code !== 'auth/popup-closed-by-user') showError(err.message) }
   })
-
-  // Enter key
   app.querySelectorAll('.input').forEach(input => {
-    input.addEventListener('keydown', e => {
-      if (e.key === 'Enter') document.getElementById('auth-submit').click()
-    })
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('auth-submit').click() })
   })
 }
 
-/* ========== Main App ========== */
+/* ========== Shell ========== */
 function renderApp() {
   const app = document.getElementById('app')
+  const points = getProfile().points || 0
   app.innerHTML = `
     <header class="header">
       <div class="logo" data-page="home">Vector<span>.</span></div>
@@ -236,26 +270,20 @@ function renderApp() {
         <button data-page="goals" class="${currentPage === 'goals' ? 'active' : ''}">Цели</button>
         <button data-page="habits" class="${currentPage === 'habits' ? 'active' : ''}">Привычки</button>
         <button data-page="journal" class="${currentPage === 'journal' ? 'active' : ''}">Дневник</button>
+        <button data-page="journey" class="${currentPage === 'journey' ? 'active' : ''}">Путь</button>
+        <button data-page="progress" class="${currentPage === 'progress' ? 'active' : ''}">Прогресс</button>
         <button data-page="analytics" class="${currentPage === 'analytics' ? 'active' : ''}">Аналитика</button>
         <button data-page="profile" class="profile ${currentPage === 'profile' ? 'active' : ''}">Профиль</button>
       </nav>
       <button class="btn-logout" id="logout-btn">Выйти</button>
     </header>
     <main class="container" id="page-content"></main>
-    <p class="soft-footer">Vector · мягкий путь к себе</p>
-  `
+    <p class="soft-footer">Vector · мягкий путь к себе · ${points} ⭐</p>`
 
   app.querySelectorAll('[data-page]').forEach(el => {
-    el.addEventListener('click', () => {
-      currentPage = el.dataset.page
-      renderApp()
-    })
+    el.addEventListener('click', () => { currentPage = el.dataset.page; renderApp() })
   })
-
-  document.getElementById('logout-btn').addEventListener('click', async () => {
-    await signOut(auth)
-  })
-
+  document.getElementById('logout-btn').addEventListener('click', () => signOut(auth))
   renderPage()
 }
 
@@ -266,75 +294,72 @@ function renderPage() {
     case 'goals': content.innerHTML = pageGoals(); bindGoals(); break
     case 'habits': content.innerHTML = pageHabits(); bindHabits(); break
     case 'journal': content.innerHTML = pageJournal(); bindJournal(); break
+    case 'journey': content.innerHTML = pageJourney(); break
+    case 'progress': content.innerHTML = pageProgress(); break
     case 'analytics': content.innerHTML = pageAnalytics(); break
     case 'profile': content.innerHTML = pageProfile(); bindProfile(); break
   }
 }
 
-/* ----- Pages (same as before) ----- */
 function pageHome() {
-  const goals = getGoals()
-  const habits = getHabits()
-  const journal = getJournal()
   const profile = getProfile()
-  const activeGoals = goals.filter(g => !g.completed).length
-  const maxStreak = habits.reduce((m, h) => Math.max(m, calcStreak(h)), 0)
-  const lastJ = journal.length
-    ? journal.sort((a, b) => b.date.localeCompare(a.date))[0].date
-    : null
-  const lastJText = lastJ?.startsWith(today()) ? 'Сегодня'
-    : lastJ ? lastJ.slice(0, 10) : 'Пока нет записей'
   const name = profile.name || currentUser?.displayName || 'друг'
+  const streak = getOverallStreak()
+  const points = profile.points || 0
+  const activeGoals = getActiveGoals().length
+  const habits = getHabits()
+  const maxHabitStreak = habits.reduce((m, h) => Math.max(m, calcHabitStreak(h)), 0)
+  const journal = getJournal()
+  const lastJ = journal.length ? journal.sort((a, b) => b.date.localeCompare(a.date))[0].date : null
+  const lastJText = lastJ?.startsWith(today()) ? 'Сегодня' : lastJ ? lastJ.slice(0, 10) : 'Пока нет записей'
+  const achievements = getAchievements().filter(a => a.earned).slice(0, 4)
 
   return `
     <section class="welcome-card">
       <h1>Привет, ${escapeHtml(name)} 👋</h1>
-      <p>Каждый день — маленький шаг к лучшей версии себя. Здесь спокойно и без спешки.</p>
+      <p>Каждый день — маленький шаг. Отметь привычку или запиши мысль — и серия продолжится.</p>
     </section>
+    <div class="streak-banner">
+      <div class="streak-fire">🔥</div>
+      <div class="streak-info">
+        <h3>${streak > 0 ? `${streak} ${streak === 1 ? 'день' : streak < 5 ? 'дня' : 'дней'} подряд` : 'Начни серию сегодня'}</h3>
+        <p>${streak > 0 ? 'Сделай что-нибудь сегодня, чтобы не сбросить серию' : 'Отметь привычку, цель или запись в дневник'}</p>
+      </div>
+      <div class="streak-points">⭐ ${points}</div>
+    </div>
+    ${achievements.length ? `<div class="achievements">${achievements.map(a => `<div class="badge earned">${a.icon} ${a.title}</div>`).join('')}</div>` : ''}
     <section class="dashboard">
-      <div class="card">
-        <div class="card-icon">🎯</div>
-        <h2>Цели</h2>
-        <p>${activeGoals === 0 ? 'Пока нет активных целей' : activeGoals === 1 ? '1 активная цель' : `${activeGoals} активные цели`}</p>
-        <button class="btn" data-page="goals">Посмотреть</button>
-      </div>
-      <div class="card">
-        <div class="card-icon">🔥</div>
-        <h2>Привычки</h2>
-        <p>${maxStreak === 0 ? 'Начни серию сегодня' : `Серия: ${maxStreak} ${maxStreak === 1 ? 'день' : 'дней'}`}</p>
-        <button class="btn" data-page="habits">Открыть</button>
-      </div>
-      <div class="card">
-        <div class="card-icon">📓</div>
-        <h2>Дневник</h2>
-        <p>${lastJText === 'Сегодня' ? 'Запись есть сегодня' : lastJText === 'Пока нет записей' ? 'Пока нет записей' : `Последняя: ${lastJText}`}</p>
-        <button class="btn" data-page="journal">Написать</button>
-      </div>
-      <div class="card">
-        <div class="card-icon">📊</div>
-        <h2>Прогресс</h2>
-        <p>Ваш уровень: ${profile.level || calcLevel()}</p>
-        <button class="btn" data-page="analytics">Подробнее</button>
-      </div>
-    </section>
-  `
+      <div class="card"><div class="card-icon">🎯</div><h2>Цели</h2>
+        <p>${activeGoals === 0 ? 'Нет активных целей' : activeGoals === 1 ? '1 активная цель' : `${activeGoals} активных целей`}</p>
+        <button class="btn" data-page="goals">Открыть</button></div>
+      <div class="card"><div class="card-icon">🔥</div><h2>Привычки</h2>
+        <p>${maxHabitStreak === 0 ? 'Начни отмечать сегодня' : `Лучшая серия: ${maxHabitStreak} дн.`}</p>
+        <button class="btn" data-page="habits">Открыть</button></div>
+      <div class="card"><div class="card-icon">📓</div><h2>Дневник</h2>
+        <p>${lastJText === 'Сегодня' ? 'Есть запись сегодня' : lastJText === 'Пока нет записей' ? 'Пока нет записей' : `Последняя: ${lastJText}`}</p>
+        <button class="btn" data-page="journal">Написать</button></div>
+      <div class="card"><div class="card-icon">🛤️</div><h2>Твой путь</h2>
+        <p>${daysWithVector()} дн. с Vector · ${points} ⭐</p>
+        <button class="btn" data-page="journey">Смотреть</button></div>
+    </section>`
 }
 
+/* ----- Goals: complete = remove from list (points once); soft-delete = restore from bottom ----- */
 function pageGoals() {
-  const goals = getGoals()
-  const list = goals.length === 0
-    ? `<div class="empty-state"><div class="emoji">🌱</div><p>Пока нет целей. Добавь первую — и путь начнётся.</p></div>`
-    : `<div class="item-list">${goals.map((g, i) => `
-        <div class="item ${g.completed ? 'done' : ''}">
-          <div class="checkbox ${g.completed ? 'checked' : ''}" data-action="toggle" data-i="${i}">${g.completed ? '✓' : ''}</div>
+  const active = getActiveGoals()
+  const deleted = getDeletedGoals()
+
+  const list = active.length === 0
+    ? `<div class="empty-state"><div class="emoji">🌱</div><p>Пока нет целей. Добавь первую.</p></div>`
+    : `<div class="item-list">${active.map(g => `
+        <div class="item">
+          <div class="checkbox" data-action="complete" data-id="${g.id}" title="Выполнить"></div>
           <div class="item-content">
             <div class="item-title">${escapeHtml(g.title)}</div>
-            <div class="item-meta">${g.completed ? 'Выполнено' : 'В процессе'}${g.progress != null ? ` · ${g.progress}%` : ''}</div>
-            ${!g.completed ? `<div class="progress-bar"><div class="progress-fill" style="width:${g.progress || 0}%"></div></div>` : ''}
+            <div class="item-meta">В работе · нажми галочку, чтобы выполнить</div>
           </div>
           <div class="item-actions">
-            ${!g.completed ? `<button class="btn btn-sm btn-secondary" data-action="progress" data-i="${i}">+10%</button>` : ''}
-            <button class="btn btn-sm btn-ghost" data-action="delete" data-i="${i}">Удалить</button>
+            <button class="btn btn-sm btn-ghost" data-action="delete" data-id="${g.id}">Удалить</button>
           </div>
         </div>
       `).join('')}</div>`
@@ -343,15 +368,22 @@ function pageGoals() {
     <div class="page-header">
       <div>
         <h1>🎯 Мои цели</h1>
-        <p class="subtitle">Маленькие шаги к большим переменам</p>
+        <p class="subtitle">Выполнил — цель уходит из списка. Случайно удалил — верни кнопкой снизу.</p>
       </div>
     </div>
     <div class="form-row">
-      <input type="text" id="goal-input" class="input" placeholder="Новая цель… например, прочитать 12 книг">
+      <input type="text" id="goal-input" class="input" placeholder="Например: читать 10 минут каждый день">
       <button class="btn" id="add-goal">Добавить</button>
     </div>
     ${list}
-  `
+    ${deleted.length > 0 ? `
+      <div class="restore-bar">
+        <button class="btn btn-restore" id="restore-last">↩ Вернуть последнюю удалённую</button>
+      </div>
+      <p style="font-size:13px;color:var(--text-muted);margin-top:8px">
+        В корзине: ${deleted.length} ${deleted.length === 1 ? 'цель' : 'целей'}
+      </p>
+    ` : ''}`
 }
 
 function bindGoals() {
@@ -360,7 +392,15 @@ function bindGoals() {
     const title = input.value.trim()
     if (!title) return
     const goals = getGoals()
-    goals.unshift({ id: Date.now(), title, completed: false, progress: 0, createdAt: new Date().toISOString() })
+    goals.unshift({
+      id: Date.now(),
+      title,
+      completed: false,
+      deleted: false,
+      pointsAwarded: false,
+      createdAt: new Date().toISOString(),
+      completedAt: null
+    })
     saveGoals(goals)
     input.value = ''
     showToast('Цель добавлена ✨')
@@ -369,67 +409,113 @@ function bindGoals() {
   document.getElementById('goal-input')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') document.getElementById('add-goal').click()
   })
-  document.querySelectorAll('[data-action]').forEach(el => {
+
+  // Complete goal → remove from active list, award points ONLY once
+  document.querySelectorAll('[data-action="complete"]').forEach(el => {
     el.addEventListener('click', () => {
-      const i = +el.dataset.i
+      const id = +el.dataset.id
       const goals = getGoals()
-      if (el.dataset.action === 'toggle') {
-        goals[i].completed = !goals[i].completed
-        if (goals[i].completed) goals[i].progress = 100
-        saveGoals(goals)
-        showToast(goals[i].completed ? 'Цель выполнена 🎉' : 'Цель снова в работе')
-      } else if (el.dataset.action === 'progress') {
-        goals[i].progress = Math.min(100, (goals[i].progress || 0) + 10)
-        if (goals[i].progress >= 100) {
-          goals[i].completed = true
-          showToast('Цель достигнута! 🌟')
-        } else showToast(`Прогресс: ${goals[i].progress}%`)
-        saveGoals(goals)
-      } else if (el.dataset.action === 'delete') {
-        goals.splice(i, 1)
-        saveGoals(goals)
-        showToast('Цель удалена')
+      const g = goals.find(x => x.id === id)
+      if (!g || g.completed) return
+      g.completed = true
+      g.deleted = false
+      g.completedAt = new Date().toISOString()
+      let pts = getProfile().points || 0
+      if (!g.pointsAwarded) {
+        g.pointsAwarded = true
+        pts = awardDailyActivity(25)
+        showToast(`Цель выполнена! +очки · ${pts} ⭐`)
+      } else {
+        showToast('Цель выполнена')
       }
+      saveGoals(goals)
       renderPage()
     })
   })
+
+  // Soft delete (can restore)
+  document.querySelectorAll('[data-action="delete"]').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = +el.dataset.id
+      const goals = getGoals()
+      const g = goals.find(x => x.id === id)
+      if (!g) return
+      g.deleted = true
+      g.deletedAt = new Date().toISOString()
+      saveGoals(goals)
+      showToast('Цель удалена · можно вернуть кнопкой снизу')
+      renderPage()
+    })
+  })
+
+  // Restore last soft-deleted goal (bottom button, like Add)
+  document.getElementById('restore-last')?.addEventListener('click', () => {
+    const goals = getGoals()
+    const deleted = goals
+      .filter(g => g.deleted && !g.completed)
+      .sort((a, b) => (b.deletedAt || '').localeCompare(a.deletedAt || ''))
+    if (!deleted.length) return
+    const g = deleted[0]
+    g.deleted = false
+    g.deletedAt = null
+    saveGoals(goals)
+    showToast('Цель возвращена ↩')
+    renderPage()
+  })
 }
 
+/* ----- Habits ----- */
 function pageHabits() {
   const habits = getHabits()
   const t = today()
+  const overall = getOverallStreak()
+  const points = getProfile().points || 0
+  const week = lastNDays(7)
+  const activeDays = getActiveDays()
+  const calendar = week.map(day => {
+    const done = activeDays.has(day)
+    const isToday = day === t
+    const label = new Date(day + 'T12:00:00').toLocaleDateString('ru-RU', { weekday: 'short' })
+    return `<div class="streak-day ${done ? 'done' : ''} ${isToday ? 'today' : ''}">${label}</div>`
+  }).join('')
+
   const list = habits.length === 0
-    ? `<div class="empty-state"><div class="emoji">🌿</div><p>Пока нет привычек. Начни с одной простой — и строй серию.</p></div>`
-    : `<div class="item-list">${habits.map((h, i) => {
+    ? `<div class="empty-state"><div class="emoji">🌿</div><p>Добавь привычку и отмечай каждый день.</p></div>`
+    : `<div class="item-list">${habits.map(h => {
         const done = h.history?.includes(t)
-        const streak = calcStreak(h)
+        const streak = calcHabitStreak(h)
         return `
           <div class="item ${done ? 'done' : ''}">
-            <div class="checkbox ${done ? 'checked' : ''}" data-action="toggle" data-i="${i}">${done ? '✓' : ''}</div>
+            <div class="checkbox ${done ? 'checked' : ''}" data-action="toggle" data-id="${h.id}">${done ? '✓' : ''}</div>
             <div class="item-content">
               <div class="item-title">${escapeHtml(h.title)}</div>
-              <div class="item-meta">Серия: <strong>${streak}</strong> ${streak === 1 ? 'день' : 'дней'}${done ? ' · сегодня выполнено' : ''}</div>
+              <div class="item-meta">Серия: <strong>${streak}</strong> дн.${done ? ' · сегодня ✓' : ''}</div>
             </div>
             <div class="item-actions">
-              <button class="btn btn-sm btn-ghost" data-action="delete" data-i="${i}">Удалить</button>
+              <button class="btn btn-sm btn-ghost" data-action="delete" data-id="${h.id}">Удалить</button>
             </div>
-          </div>
-        `
+          </div>`
       }).join('')}</div>`
 
   return `
-    <div class="page-header">
-      <div>
-        <h1>🔥 Мои привычки</h1>
-        <p class="subtitle">Маленькие действия каждый день</p>
+    <div class="page-header"><div>
+      <h1>🔥 Мои привычки</h1>
+      <p class="subtitle">Отметил сегодня — серия +1</p>
+    </div></div>
+    <div class="streak-banner">
+      <div class="streak-fire">🔥</div>
+      <div class="streak-info">
+        <h3>${overall > 0 ? `${overall} ${overall === 1 ? 'день' : overall < 5 ? 'дня' : 'дней'} подряд` : 'Серия ещё не начата'}</h3>
+        <p>${overall > 0 ? 'Не пропусти день' : 'Отметь привычку сегодня'}</p>
       </div>
+      <div class="streak-points">⭐ ${points}</div>
     </div>
+    <div class="streak-calendar">${calendar}</div>
     <div class="form-row">
-      <input type="text" id="habit-input" class="input" placeholder="Новая привычка… например, медитация 10 мин">
+      <input type="text" id="habit-input" class="input" placeholder="Например: читать 10 минут">
       <button class="btn" id="add-habit">Добавить</button>
     </div>
-    ${list}
-  `
+    ${list}`
 }
 
 function bindHabits() {
@@ -449,66 +535,63 @@ function bindHabits() {
   })
   document.querySelectorAll('[data-action]').forEach(el => {
     el.addEventListener('click', () => {
-      const i = +el.dataset.i
+      const id = +el.dataset.id
       const habits = getHabits()
+      const h = habits.find(x => x.id === id)
+      if (!h) return
       if (el.dataset.action === 'toggle') {
-        const h = habits[i]
         if (!h.history) h.history = []
         const idx = h.history.indexOf(today())
         if (idx >= 0) {
           h.history.splice(idx, 1)
-          showToast('Отмечено как невыполненное')
+          saveHabits(habits)
+          showToast('Снято')
         } else {
           h.history.push(today())
-          const streak = calcStreak(h)
-          showToast(streak > 1 ? `Серия: ${streak} дней! 🔥` : 'Отлично, первый день ✨')
+          saveHabits(habits)
+          const streak = calcHabitStreak(h)
+          const pts = awardDailyActivity(15)
+          showToast(streak > 1 ? `Серия: ${streak} 🔥 · ${pts} ⭐` : `Серия началась · ${pts} ⭐`)
         }
-        saveHabits(habits)
+        renderPage()
       } else if (el.dataset.action === 'delete') {
-        habits.splice(i, 1)
-        saveHabits(habits)
-        showToast('Привычка удалена')
+        saveHabits(habits.filter(x => x.id !== id))
+        showToast('Удалено')
+        renderPage()
       }
-      renderPage()
     })
   })
 }
 
+/* ----- Journal ----- */
 function pageJournal() {
   const entries = getJournal().sort((a, b) => b.date.localeCompare(a.date))
   const list = entries.length === 0
-    ? `<div class="empty-state"><div class="emoji">🕊️</div><p>Пока нет записей. Напиши первую — даже пару строк уже достаточно.</p></div>`
+    ? `<div class="empty-state"><div class="emoji">🕊️</div><p>Напиши первую запись.</p></div>`
     : entries.map(e => {
         const d = new Date(e.date)
         const dateStr = d.toDateString() === new Date().toDateString() ? 'Сегодня'
-          : d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })
-        return `
-          <div class="journal-entry">
-            <div class="date">${dateStr} · ${d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</div>
-            <div class="text">${escapeHtml(e.text)}</div>
-            <div style="margin-top:10px">
-              <button class="btn btn-sm btn-ghost" data-action="delete" data-id="${e.id}">Удалить</button>
-            </div>
-          </div>
-        `
+          : d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })
+        return `<div class="journal-entry">
+          <div class="date">${dateStr} · ${d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</div>
+          <div class="text">${escapeHtml(e.text)}</div>
+          <div style="margin-top:10px"><button class="btn btn-sm btn-ghost" data-action="delete" data-id="${e.id}">Удалить</button></div>
+        </div>`
       }).join('')
 
   return `
-    <div class="page-header">
-      <div>
-        <h1>📓 Личный дневник</h1>
-        <p class="subtitle">Место для мыслей, благодарности и рефлексии</p>
-      </div>
-    </div>
+    <div class="page-header"><div>
+      <h1>📓 Дневник</h1>
+      <p class="subtitle">Запись тоже поддерживает серию</p>
+    </div></div>
     <div style="margin-bottom:24px">
-      <textarea id="entry-input" class="input" placeholder="Что сегодня было важным? Что чувствуешь? За что благодарен?"></textarea>
-      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn" id="save-entry">Сохранить запись</button>
+      <textarea id="entry-input" class="input" placeholder="Что сегодня было важным?"></textarea>
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <button class="btn" id="save-entry">Сохранить</button>
         <button class="btn btn-ghost" id="clear-entry">Очистить</button>
       </div>
     </div>
-    ${list}
-  `
+    ${list}`
 }
 
 function bindJournal() {
@@ -519,143 +602,156 @@ function bindJournal() {
     const entries = getJournal()
     entries.push({ id: Date.now(), text, date: new Date().toISOString() })
     saveJournal(entries)
+    const pts = awardDailyActivity(10)
     input.value = ''
-    showToast('Запись сохранена 📝')
+    showToast(`Сохранено · ${pts} ⭐`)
     renderPage()
   })
   document.getElementById('clear-entry')?.addEventListener('click', () => {
     document.getElementById('entry-input').value = ''
-    document.getElementById('entry-input').focus()
   })
   document.querySelectorAll('[data-action="delete"]').forEach(el => {
     el.addEventListener('click', () => {
-      const id = +el.dataset.id
-      saveJournal(getJournal().filter(e => e.id !== id))
-      showToast('Запись удалена')
+      saveJournal(getJournal().filter(e => e.id !== +el.dataset.id))
+      showToast('Удалено')
       renderPage()
     })
   })
 }
 
-function pageAnalytics() {
+function pageJourney() {
+  const days = daysWithVector()
+  const actions = totalActions()
+  const checks = getHabits().reduce((s, h) => s + (h.history?.length || 0), 0)
+  const goalsDone = getCompletedGoals().length
+  const journalCount = getJournal().length
+  const overall = getOverallStreak()
+  const points = getProfile().points || 0
+  const achievements = getAchievements()
+  return `
+    <div class="page-header"><div><h1>🛤️ Твой путь</h1><p class="subtitle">Вся история прогресса</p></div></div>
+    <div class="journey-hero">
+      <h2>С Vector уже</h2>
+      <div class="big-number">${days}</div>
+      <div class="big-label">${days === 1 ? 'день' : days < 5 ? 'дня' : 'дней'}</div>
+    </div>
+    <div class="journey-stats">
+      <div class="journey-stat"><div class="num">${actions}</div><div class="lbl">действий</div></div>
+      <div class="journey-stat"><div class="num">${checks}</div><div class="lbl">отметок</div></div>
+      <div class="journey-stat"><div class="num">${goalsDone}</div><div class="lbl">целей</div></div>
+      <div class="journey-stat"><div class="num">${journalCount}</div><div class="lbl">записей</div></div>
+      <div class="journey-stat"><div class="num">${overall}</div><div class="lbl">серия</div></div>
+      <div class="journey-stat"><div class="num">${points}</div><div class="lbl">очков ⭐</div></div>
+    </div>
+    <div class="section-title">Достижения</div>
+    <div class="achievements">
+      ${achievements.map(a => `<div class="badge ${a.earned ? 'earned' : 'locked'}">${a.icon} ${a.title}</div>`).join('')}
+    </div>`
+}
+
+function pageProgress() {
   const habits = getHabits()
-  const goals = getGoals()
   const journal = getJournal()
-  const profile = getProfile()
-  const t = today()
-
-  const activeGoals = goals.filter(g => !g.completed).length
-  const completedGoals = goals.filter(g => g.completed).length
-  const maxStreak = habits.reduce((m, h) => Math.max(m, calcStreak(h)), 0)
-  const doneToday = habits.filter(h => h.history?.includes(t)).length
-  const totalHabits = habits.length
-  const journalToday = journal.some(e => e.date.startsWith(t))
-
-  const stats = [
-    { value: activeGoals, label: 'Активные цели' },
-    { value: completedGoals, label: 'Достигнутые цели' },
-    { value: maxStreak, label: 'Лучшая серия' },
-    { value: totalHabits ? `${doneToday}/${totalHabits}` : '0', label: 'Привычки сегодня' },
-    { value: journal.length, label: 'Записей в дневнике' },
-    { value: profile.level || calcLevel(), label: 'Уровень' }
-  ]
-
-  let summary = []
-  if (totalHabits === 0 && activeGoals === 0 && journal.length === 0) {
-    summary.push('Пока данных мало — это нормально. Начни с одной привычки или цели.')
-  } else {
-    if (doneToday > 0) summary.push(`Сегодня отмечено ${doneToday} из ${totalHabits} привычек.`)
-    else if (totalHabits > 0) summary.push('Сегодня ещё можно отметить привычки.')
-    if (journalToday) summary.push('В дневнике уже есть запись за сегодня.')
-    else summary.push('Можно написать пару строк в дневник — это всегда полезно.')
-    if (maxStreak >= 3) summary.push(`Отличная серия: ${maxStreak} дней подряд!`)
-  }
+  const goals = getGoals()
+  const monthAgo = daysAgo(30)
+  let checksLast30 = 0, checksBefore = 0
+  habits.forEach(h => (h.history || []).forEach(d => { if (d >= monthAgo) checksLast30++; else checksBefore++ }))
+  const journalLast30 = journal.filter(e => e.date.slice(0, 10) >= monthAgo).length
+  const journalBefore = journal.length - journalLast30
+  const goalsLast30 = goals.filter(g => g.completed && g.completedAt && g.completedAt.slice(0, 10) >= monthAgo).length
+  const goalsBefore = goals.filter(g => g.completed && (!g.completedAt || g.completedAt.slice(0, 10) < monthAgo)).length
+  const hasData = checksLast30 + journalLast30 + goalsLast30 + checksBefore + journalBefore + goalsBefore > 0
 
   return `
-    <div class="page-header">
-      <div>
-        <h1>📊 Аналитика</h1>
-        <p class="subtitle">Твой прогресс в цифрах — спокойно и честно</p>
-      </div>
-    </div>
-    <div class="stats-grid">
-      ${stats.map(s => `
-        <div class="stat-card">
-          <div class="value">${s.value}</div>
-          <div class="label">${s.label}</div>
+    <div class="page-header"><div><h1>📈 Прогресс</h1><p class="subtitle">За последние 30 дней</p></div></div>
+    ${!hasData ? `<div class="empty-state"><div class="emoji">🌱</div><p>Пока мало данных. Отмечай привычки и цели.</p></div>` : `
+      <div class="compare-grid">
+        <div class="compare-card before"><h3>🌑 Ранее</h3>
+          <div class="compare-row"><span>Привычки</span><span class="val">${checksBefore}</span></div>
+          <div class="compare-row"><span>Дневник</span><span class="val">${journalBefore}</span></div>
+          <div class="compare-row"><span>Цели</span><span class="val">${goalsBefore}</span></div>
         </div>
-      `).join('')}
-    </div>
-    <div class="card" style="margin-top:8px">
-      <h2 style="margin-bottom:10px;font-size:16px">Сегодня</h2>
-      <p style="color:var(--text-soft);font-size:14px;line-height:1.6">${summary.join(' ')}</p>
-    </div>
-  `
+        <div class="compare-card after"><h3>✨ За 30 дней</h3>
+          <div class="compare-row"><span>Привычки</span><span class="val">${checksLast30}</span></div>
+          <div class="compare-row"><span>Дневник</span><span class="val">${journalLast30}</span></div>
+          <div class="compare-row"><span>Цели</span><span class="val">${goalsLast30}</span></div>
+        </div>
+      </div>
+      <div class="delta-card"><h3>Прогресс за месяц</h3>
+        <div class="delta-item"><span class="plus">+${checksLast30}</span> отметок</div>
+        <div class="delta-item"><span class="plus">+${journalLast30}</span> записей</div>
+        <div class="delta-item"><span class="plus">+${goalsLast30}</span> целей</div>
+      </div>`}`
+}
+
+function pageAnalytics() {
+  const habits = getHabits()
+  const t = today()
+  const totalChecks = habits.reduce((s, h) => s + (h.history?.length || 0), 0)
+  const stats = [
+    { value: habits.length, label: 'Привычек' },
+    { value: totalChecks, label: 'Всего отметок' },
+    { value: habits.filter(h => h.history?.includes(t)).length, label: 'Сегодня' },
+    { value: getOverallStreak(), label: 'Серия дней' },
+    { value: habits.reduce((m, h) => Math.max(m, calcHabitStreak(h)), 0), label: 'Лучшая серия' },
+    { value: getActiveGoals().length, label: 'Активные цели' },
+    { value: getCompletedGoals().length, label: 'Достигнутые цели' },
+    { value: getJournal().length, label: 'Записей' },
+    { value: daysWithVector(), label: 'Дней с Vector' },
+    { value: getProfile().points || 0, label: 'Очков ⭐' },
+    { value: calcLevel(), label: 'Уровень' }
+  ]
+  return `
+    <div class="page-header"><div><h1>📊 Аналитика</h1><p class="subtitle">Все цифры</p></div></div>
+    <div class="stats-grid">${stats.map(s => `
+      <div class="stat-card"><div class="value">${s.value}</div><div class="label">${s.label}</div></div>
+    `).join('')}</div>`
 }
 
 function pageProfile() {
   const profile = getProfile()
-  const level = calcLevel()
-  profile.level = level
-  saveProfile(profile)
-
+  const points = profile.points || 0
   const joined = profile.createdAt
     ? new Date(profile.createdAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })
     : '—'
-
   return `
-    <div class="page-header">
-      <div>
-        <h1>👤 Профиль</h1>
-        <p class="subtitle">Немного о тебе</p>
-      </div>
-    </div>
+    <div class="page-header"><div><h1>👤 Профиль</h1></div></div>
     <div class="profile-card">
       <div class="profile-avatar">😊</div>
-      <div class="profile-field">
-        <label for="name-input">Имя</label>
-        <input type="text" id="name-input" class="input" value="${escapeHtml(profile.name || currentUser?.displayName || '')}" placeholder="Как к тебе обращаться?">
-      </div>
-      <div class="profile-field">
-        <label>Email</label>
-        <div style="color:var(--text-soft);font-size:14px">${currentUser?.email || '—'}</div>
-      </div>
-      <div class="profile-field">
-        <label>Уровень</label>
-        <div style="font-size:18px;font-weight:600;color:var(--blue-accent)">${level}</div>
-      </div>
-      <div class="profile-field">
-        <label>С нами с</label>
-        <div style="color:var(--text-soft)">${joined}</div>
-      </div>
-      <button class="btn" id="save-profile" style="margin-top:8px">Сохранить</button>
-    </div>
-  `
+      <div class="profile-field"><label>Имя</label>
+        <input type="text" id="name-input" class="input" value="${escapeHtml(profile.name || '')}"></div>
+      <div class="profile-field"><label>Email</label>
+        <div style="color:var(--text-soft);font-size:14px">${currentUser?.email || '—'}</div></div>
+      <div class="profile-field"><label>Уровень</label>
+        <div style="font-size:18px;font-weight:600;color:var(--blue-accent)">${calcLevel(points)}</div></div>
+      <div class="profile-field"><label>Очки</label>
+        <div style="font-size:18px;font-weight:600;color:var(--orange-accent)">⭐ ${points}</div></div>
+      <div class="profile-field"><label>С нами с</label>
+        <div style="color:var(--text-soft)">${joined}</div></div>
+      <button class="btn" id="save-profile">Сохранить</button>
+    </div>`
 }
 
 function bindProfile() {
   document.getElementById('save-profile')?.addEventListener('click', () => {
     const profile = getProfile()
     profile.name = document.getElementById('name-input').value.trim() || 'Друг'
-    profile.level = calcLevel()
     saveProfile(profile)
-    showToast('Профиль сохранён 💛')
+    showToast('Сохранено 💛')
     renderPage()
   })
 }
 
-/* ========== Auth State ========== */
 document.getElementById('app').innerHTML = `<div class="loading-screen">Загрузка…</div>`
 
 onAuthStateChanged(auth, (user) => {
   currentUser = user
   if (user) {
-    // Если имя ещё не сохранено — берём из Google/регистрации
     const profile = getProfile()
-    if ((!profile.name || profile.name === 'Друг') && user.displayName) {
-      profile.name = user.displayName
-      saveProfile(profile)
-    }
+    if ((!profile.name || profile.name === 'Друг') && user.displayName) profile.name = user.displayName
+    if (!profile.createdAt) profile.createdAt = new Date().toISOString()
+    if (profile.points == null) profile.points = 0
+    saveProfile(profile)
     renderApp()
   } else {
     currentPage = 'home'
@@ -663,7 +759,6 @@ onAuthStateChanged(auth, (user) => {
   }
 })
 
-// Делегирование кнопок на главной
 document.addEventListener('click', e => {
   const btn = e.target.closest('[data-page]')
   if (btn && btn.tagName === 'BUTTON' && btn.closest('.card')) {
@@ -672,4 +767,4 @@ document.addEventListener('click', e => {
   }
 })
 
-console.log('Vector · с авторизацией')
+console.log('Vector v1.3.1')
