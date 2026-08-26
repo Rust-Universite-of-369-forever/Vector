@@ -30,16 +30,19 @@ let currentUser = null
 let currentPage = 'home'
 
 const today = () => new Date().toISOString().slice(0, 10)
+
 function daysAgo(n) {
   const d = new Date()
   d.setDate(d.getDate() - n)
   return d.toISOString().slice(0, 10)
 }
+
 function lastNDays(n) {
   const days = []
   for (let i = n - 1; i >= 0; i--) days.push(daysAgo(i))
   return days
 }
+
 function uid() { return currentUser?.uid || null }
 
 function getProfile() {
@@ -79,6 +82,7 @@ function getActiveDays() {
   return set
 }
 
+/** Current consecutive streak (may be 0 if skipped) */
 function getOverallStreak() {
   const allDays = getActiveDays()
   if (allDays.size === 0) return 0
@@ -96,6 +100,35 @@ function getOverallStreak() {
     expected = d.toISOString().slice(0, 10)
   }
   return streak
+}
+
+/** Longest consecutive streak ever (history is never erased) */
+function getBestStreak() {
+  const allDays = [...getActiveDays()].sort()
+  if (allDays.length === 0) return 0
+  let best = 1
+  let cur = 1
+  for (let i = 1; i < allDays.length; i++) {
+    const prev = new Date(allDays[i - 1])
+    const next = new Date(allDays[i])
+    const diff = Math.round((next - prev) / 86400000)
+    if (diff === 1) {
+      cur++
+      best = Math.max(best, cur)
+    } else {
+      cur = 1
+    }
+  }
+  return best
+}
+
+/** Days since last activity */
+function daysSinceLastActivity() {
+  const allDays = [...getActiveDays()].sort().reverse()
+  if (allDays.length === 0) return null
+  const last = allDays[0]
+  const diff = Math.round((new Date(today()) - new Date(last)) / 86400000)
+  return diff
 }
 
 function calcHabitStreak(habit) {
@@ -140,8 +173,166 @@ function dayWord(n) {
   return n === 1 ? 'day' : 'days'
 }
 
+/* ===== 30-day progress stats ===== */
+function get30DayStats() {
+  const monthAgo = daysAgo(30)
+  const prevStart = daysAgo(60)
+
+  const habits = getHabits()
+  const journal = getJournal()
+  const goals = getGoals()
+
+  let checks30 = 0
+  let checksPrev = 0
+  habits.forEach(h => {
+    (h.history || []).forEach(d => {
+      if (d >= monthAgo) checks30++
+      else if (d >= prevStart) checksPrev++
+    })
+  })
+
+  const journal30 = journal.filter(e => e.date.slice(0, 10) >= monthAgo).length
+  const journalPrev = journal.filter(e => {
+    const d = e.date.slice(0, 10)
+    return d >= prevStart && d < monthAgo
+  }).length
+
+  const goals30 = goals.filter(g => g.completed && g.completedAt && g.completedAt.slice(0, 10) >= monthAgo).length
+  const goalsPrev = goals.filter(g => {
+    if (!g.completed || !g.completedAt) return false
+    const d = g.completedAt.slice(0, 10)
+    return d >= prevStart && d < monthAgo
+  }).length
+
+  const total30 = checks30 + journal30 + goals30
+  const totalPrev = checksPrev + journalPrev + goalsPrev
+
+  let activityPct = 0
+  if (totalPrev === 0) {
+    activityPct = total30 > 0 ? 100 : 0
+  } else {
+    activityPct = Math.round(((total30 - totalPrev) / totalPrev) * 100)
+  }
+
+  return {
+    goals30,
+    checks30,
+    journal30,
+    total30,
+    activityPct
+  }
+}
+
+/* ===== Weekly summary ===== */
+function getWeekRange() {
+  const now = new Date()
+  const day = now.getDay() // 0 Sun
+  const start = new Date(now)
+  // Week starts Monday
+  const mondayOffset = day === 0 ? -6 : 1 - day
+  start.setDate(now.getDate() + mondayOffset)
+  const end = new Date(start)
+  end.setDate(start.getDate() + 6)
+  return {
+    start: start.toISOString().slice(0, 10),
+    end: end.toISOString().slice(0, 10),
+    isSunday: day === 0
+  }
+}
+
+function getWeekStats(start, end) {
+  const habits = getHabits()
+  const journal = getJournal()
+  const goals = getGoals()
+
+  let checks = 0
+  const habitTitles = {}
+  habits.forEach(h => {
+    const inWeek = (h.history || []).filter(d => d >= start && d <= end)
+    checks += inWeek.length
+    if (inWeek.length > 0) {
+      habitTitles[h.title] = inWeek.length
+    }
+  })
+
+  const journalCount = journal.filter(e => {
+    const d = e.date.slice(0, 10)
+    return d >= start && d <= end
+  }).length
+
+  const goalsCount = goals.filter(g =>
+    g.completed && g.completedAt &&
+    g.completedAt.slice(0, 10) >= start &&
+    g.completedAt.slice(0, 10) <= end
+  ).length
+
+  const totalActions = checks + journalCount + goalsCount
+
+  // Category heuristics
+  const reading = Object.entries(habitTitles)
+    .filter(([t]) => /read|book|книг|чита/i.test(t))
+    .reduce((s, [, n]) => s + n, 0)
+  const sport = Object.entries(habitTitles)
+    .filter(([t]) => /sport|train|gym|run|yoga|workout|трен|спорт|бег|зал/i.test(t))
+    .reduce((s, [, n]) => s + n, 0)
+
+  return { checks, journalCount, goalsCount, totalActions, reading, sport, habitTitles }
+}
+
+function getBestWeekInLastMonth() {
+  let best = 0
+  for (let w = 0; w < 4; w++) {
+    const end = daysAgo(w * 7)
+    const start = daysAgo(w * 7 + 6)
+    // swap if needed
+    const s = start < end ? start : end
+    const e = start < end ? end : start
+    const stats = getWeekStats(s, e)
+    best = Math.max(best, stats.totalActions)
+  }
+  return best
+}
+
+/* ===== Path (month timeline) ===== */
+function getPathMonths() {
+  const profile = getProfile()
+  const startDate = profile.createdAt ? new Date(profile.createdAt) : new Date()
+  const now = new Date()
+  const months = []
+  const cursor = new Date(startDate.getFullYear(), startDate.getMonth(), 1)
+
+  while (cursor <= now) {
+    const y = cursor.getFullYear()
+    const m = cursor.getMonth()
+    const key = `${y}-${String(m + 1).padStart(2, '0')}`
+    const daysInMonth = new Date(y, m + 1, 0).getDate()
+    const activeDays = getActiveDays()
+    const dayDots = []
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateStr = `${key}-${String(d).padStart(2, '0')}`
+      // only show days up to today
+      if (dateStr > today()) break
+      // only from createdAt
+      if (dateStr < (profile.createdAt || '').slice(0, 10)) {
+        dayDots.push({ active: false, future: true })
+        continue
+      }
+      dayDots.push({ active: activeDays.has(dateStr), future: false })
+    }
+    const activeCount = dayDots.filter(d => d.active).length
+    months.push({
+      key,
+      label: cursor.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
+      dots: dayDots,
+      activeCount
+    })
+    cursor.setMonth(cursor.getMonth() + 1)
+  }
+  return months
+}
+
 function getAchievements() {
-  const streak = getOverallStreak()
+  const streak = getBestStreak()
   const habits = getHabits()
   const goalsDone = getCompletedGoals().length
   const journal = getJournal()
@@ -304,7 +495,7 @@ function renderApp() {
       <button class="btn-logout" id="logout-btn">Log out</button>
     </header>
     <main class="container" id="page-content"></main>
-    <p class="soft-footer">Vector · a gentle path to yourself · ${points} ⭐</p>
+    <p class="soft-footer">Vector · progress over pressure · ${points} ⭐</p>
   `
 
   app.querySelectorAll('[data-page]').forEach(el => {
@@ -320,7 +511,7 @@ function renderApp() {
 function renderPage() {
   const content = document.getElementById('page-content')
   switch (currentPage) {
-    case 'home': content.innerHTML = pageHome(); break
+    case 'home': content.innerHTML = pageHome(); bindHome(); break
     case 'goals': content.innerHTML = pageGoals(); bindGoals(); break
     case 'habits': content.innerHTML = pageHabits(); bindHabits(); break
     case 'journal': content.innerHTML = pageJournal(); bindJournal(); break
@@ -331,65 +522,150 @@ function renderPage() {
   }
 }
 
+/* ========== HOME — progress-first ========== */
 function pageHome() {
   const profile = getProfile()
   const name = profile.name || currentUser?.displayName || 'friend'
+  const stats = get30DayStats()
   const streak = getOverallStreak()
-  const points = profile.points || 0
-  const activeGoals = getActiveGoals().length
-  const habits = getHabits()
-  const maxHabitStreak = habits.reduce((m, h) => Math.max(m, calcHabitStreak(h)), 0)
-  const journal = getJournal()
-  const lastJ = journal.length ? journal.sort((a, b) => b.date.localeCompare(a.date))[0].date : null
-  const lastJText = lastJ?.startsWith(today()) ? 'Today'
-    : lastJ ? lastJ.slice(0, 10) : 'No entries yet'
-  const achievements = getAchievements().filter(a => a.earned).slice(0, 4)
+  const bestStreak = getBestStreak()
+  const since = daysSinceLastActivity()
+  const week = getWeekRange()
+  const weekStats = getWeekStats(week.start, week.end)
+  const bestWeek = getBestWeekInLastMonth()
+  const isBestWeek = weekStats.totalActions > 0 && weekStats.totalActions >= bestWeek
+
+  const pctLabel = stats.activityPct > 0
+    ? `+${stats.activityPct}% activity`
+    : stats.activityPct < 0
+      ? `${stats.activityPct}% activity`
+      : stats.total30 > 0 ? 'Steady pace' : 'Start this month'
+
+  // Gentle streak block
+  let streakHtml = ''
+  if (streak > 0) {
+    streakHtml = `
+      <div class="gentle-card alive">
+        <h3>🔥 ${streak} ${dayWord(streak)} in a row</h3>
+        <p>You're on a roll. One small action today keeps it going.</p>
+      </div>
+    `
+  } else if (since !== null && since >= 2) {
+    streakHtml = `
+      <div class="gentle-card paused">
+        <h3>You missed a few days</h3>
+        <p>That's okay. Your previous <strong>${bestStreak > 0 ? bestStreak : totalActions()}</strong> ${bestStreak === 1 ? 'day of progress' : 'days of progress'} didn't disappear. History stays.</p>
+        <button class="btn" data-page="habits">Come back today →</button>
+      </div>
+    `
+  } else if (since === 1) {
+    streakHtml = `
+      <div class="gentle-card paused">
+        <h3>Yesterday is gone — today is open</h3>
+        <p>Your past check-ins are still here. One action today starts a new streak.</p>
+        <button class="btn" data-page="habits">Continue today →</button>
+      </div>
+    `
+  } else if (totalActions() === 0) {
+    streakHtml = `
+      <div class="gentle-card paused">
+        <h3>Your path starts with one step</h3>
+        <p>Add a habit, finish a goal, or write a short journal entry.</p>
+        <button class="btn" data-page="habits">Begin →</button>
+      </div>
+    `
+  }
+
+  // Weekly summary — always visible, emphasized on Sunday
+  const weekHtml = `
+    <div class="week-card">
+      ${week.isSunday ? `<div class="week-badge">Sunday · weekly review</div>` : `<div class="week-badge">This week</div>`}
+      <h2>Your week in Vector</h2>
+      <ul class="week-list">
+        <li>✨ You completed <strong>${weekStats.totalActions}</strong> actions</li>
+        ${weekStats.checks > 0 ? `<li>🔥 <strong>${weekStats.checks}</strong> habit check-ins</li>` : ''}
+        ${weekStats.reading > 0 ? `<li>📖 Reading on <strong>${weekStats.reading}</strong> ${dayWord(weekStats.reading)}</li>` : ''}
+        ${weekStats.sport > 0 ? `<li>💪 Trained <strong>${weekStats.sport}</strong> ${weekStats.sport === 1 ? 'time' : 'times'}</li>` : ''}
+        ${weekStats.journalCount > 0 ? `<li>📓 Wrote <strong>${weekStats.journalCount}</strong> journal ${weekStats.journalCount === 1 ? 'entry' : 'entries'}</li>` : ''}
+        ${weekStats.goalsCount > 0 ? `<li>🎯 Finished <strong>${weekStats.goalsCount}</strong> ${weekStats.goalsCount === 1 ? 'goal' : 'goals'}</li>` : ''}
+        ${weekStats.totalActions === 0 ? `<li><span>No actions yet this week — a quiet start is fine.</span></li>` : ''}
+      </ul>
+      ${isBestWeek && weekStats.totalActions > 0
+        ? `<div class="week-best">This is your best week in the last month 🌟</div>`
+        : ''}
+    </div>
+  `
 
   return `
-    <section class="welcome-card">
+    <section class="progress-hero">
       <h1>Hey, ${escapeHtml(name)} 👋</h1>
-      <p>Every day is a small step. Check a habit or jot a thought — and keep your streak alive.</p>
+      <p class="hero-sub">Your progress over the last 30 days</p>
+      <div class="progress-metrics">
+        <div class="metric">
+          <div class="metric-icon">🎯</div>
+          <div class="metric-value">${stats.goals30}</div>
+          <div class="metric-label">goals completed</div>
+        </div>
+        <div class="metric">
+          <div class="metric-icon">🔥</div>
+          <div class="metric-value">${stats.checks30}</div>
+          <div class="metric-label">habits checked in</div>
+        </div>
+        <div class="metric">
+          <div class="metric-icon">📖</div>
+          <div class="metric-value">${stats.journal30}</div>
+          <div class="metric-label">journal entries</div>
+        </div>
+        <div class="metric highlight">
+          <div>
+            <div class="metric-value">📈 ${pctLabel}</div>
+            <div class="metric-label">vs previous 30 days</div>
+          </div>
+        </div>
+      </div>
     </section>
-    <div class="streak-banner">
-      <div class="streak-fire">🔥</div>
-      <div class="streak-info">
-        <h3>${streak > 0 ? `${streak} ${dayWord(streak)} in a row` : 'Start your streak today'}</h3>
-        <p>${streak > 0 ? 'Do something today so you don’t break the chain' : 'Check a habit, finish a goal, or write in your journal'}</p>
-      </div>
-      <div class="streak-points">⭐ ${points}</div>
-    </div>
-    ${achievements.length ? `
-      <div class="achievements">
-        ${achievements.map(a => `<div class="badge earned">${a.icon} ${a.title}</div>`).join('')}
-      </div>
-    ` : ''}
+
+    ${streakHtml}
+    ${weekHtml}
+
     <section class="dashboard">
       <div class="card">
         <div class="card-icon">🎯</div>
         <h2>Goals</h2>
-        <p>${activeGoals === 0 ? 'No active goals' : activeGoals === 1 ? '1 active goal' : `${activeGoals} active goals`}</p>
+        <p>${getActiveGoals().length === 0 ? 'No active goals' : `${getActiveGoals().length} active`}</p>
         <button class="btn" data-page="goals">Open</button>
       </div>
       <div class="card">
         <div class="card-icon">🔥</div>
         <h2>Habits</h2>
-        <p>${maxHabitStreak === 0 ? 'Start checking in today' : `Best streak: ${maxHabitStreak} ${dayWord(maxHabitStreak)}`}</p>
+        <p>${getHabits().length === 0 ? 'Add your first habit' : `${getHabits().length} habits`}</p>
         <button class="btn" data-page="habits">Open</button>
       </div>
       <div class="card">
         <div class="card-icon">📓</div>
         <h2>Journal</h2>
-        <p>${lastJText === 'Today' ? 'You wrote today' : lastJText === 'No entries yet' ? 'No entries yet' : `Last: ${lastJText}`}</p>
+        <p>${getJournal().length === 0 ? 'No entries yet' : `${getJournal().length} entries`}</p>
         <button class="btn" data-page="journal">Write</button>
       </div>
       <div class="card">
         <div class="card-icon">🛤️</div>
-        <h2>Your journey</h2>
-        <p>${daysWithVector()} ${dayWord(daysWithVector())} with Vector · ${points} ⭐</p>
-        <button class="btn" data-page="journey">View</button>
+        <h2>My path</h2>
+        <p>${daysWithVector()} ${dayWord(daysWithVector())} with Vector</p>
+        <button class="btn" data-page="journey">View path</button>
       </div>
     </section>
   `
+}
+
+function bindHome() {
+  document.querySelectorAll('[data-page]').forEach(el => {
+    if (el.tagName === 'BUTTON' && (el.closest('.gentle-card') || el.closest('.card'))) {
+      el.addEventListener('click', () => {
+        currentPage = el.dataset.page
+        renderApp()
+      })
+    }
+  })
 }
 
 /* ----- Goals ----- */
@@ -404,7 +680,7 @@ function pageGoals() {
           <div class="checkbox" data-action="complete" data-id="${g.id}" title="Complete"></div>
           <div class="item-content">
             <div class="item-title">${escapeHtml(g.title)}</div>
-            <div class="item-meta">In progress · tap the checkbox to complete</div>
+            <div class="item-meta">In progress · tap checkbox to complete</div>
           </div>
           <div class="item-actions">
             <button class="btn btn-sm btn-ghost" data-action="delete" data-id="${g.id}">Delete</button>
@@ -416,7 +692,7 @@ function pageGoals() {
     <div class="page-header">
       <div>
         <h1>🎯 Goals</h1>
-        <p class="subtitle">Complete a goal — it leaves the list. Deleted by mistake — restore below.</p>
+        <p class="subtitle">Complete once — it leaves the list. Deleted by mistake — restore below.</p>
       </div>
     </div>
     <div class="form-row">
@@ -429,7 +705,7 @@ function pageGoals() {
         <button class="btn btn-restore" id="restore-last">↩ Restore last deleted</button>
       </div>
       <p style="font-size:13px;color:var(--text-muted);margin-top:8px">
-        In trash: ${deleted.length} ${deleted.length === 1 ? 'goal' : 'goals'}
+        In trash: ${deleted.length}
       </p>
     ` : ''}
   `
@@ -442,13 +718,8 @@ function bindGoals() {
     if (!title) return
     const goals = getGoals()
     goals.unshift({
-      id: Date.now(),
-      title,
-      completed: false,
-      deleted: false,
-      pointsAwarded: false,
-      createdAt: new Date().toISOString(),
-      completedAt: null
+      id: Date.now(), title, completed: false, deleted: false,
+      pointsAwarded: false, createdAt: new Date().toISOString(), completedAt: null
     })
     saveGoals(goals)
     input.value = ''
@@ -468,10 +739,9 @@ function bindGoals() {
       g.completed = true
       g.deleted = false
       g.completedAt = new Date().toISOString()
-      let pts = getProfile().points || 0
       if (!g.pointsAwarded) {
         g.pointsAwarded = true
-        pts = awardDailyActivity(25)
+        const pts = awardDailyActivity(25)
         showToast(`Goal completed! · ${pts} ⭐`)
       } else {
         showToast('Goal completed')
@@ -490,7 +760,7 @@ function bindGoals() {
       g.deleted = true
       g.deletedAt = new Date().toISOString()
       saveGoals(goals)
-      showToast('Deleted · you can restore it below')
+      showToast('Deleted · restore below if needed')
       renderPage()
     })
   })
@@ -501,9 +771,8 @@ function bindGoals() {
       .filter(g => g.deleted && !g.completed)
       .sort((a, b) => (b.deletedAt || '').localeCompare(a.deletedAt || ''))
     if (!deleted.length) return
-    const g = deleted[0]
-    g.deleted = false
-    g.deletedAt = null
+    deleted[0].deleted = false
+    deleted[0].deletedAt = null
     saveGoals(goals)
     showToast('Goal restored ↩')
     renderPage()
@@ -514,10 +783,12 @@ function bindGoals() {
 function pageHabits() {
   const habits = getHabits()
   const t = today()
-  const overall = getOverallStreak()
-  const points = getProfile().points || 0
+  const streak = getOverallStreak()
+  const bestStreak = getBestStreak()
+  const since = daysSinceLastActivity()
   const week = lastNDays(7)
   const activeDays = getActiveDays()
+
   const calendar = week.map(day => {
     const done = activeDays.has(day)
     const isToday = day === t
@@ -525,17 +796,35 @@ function pageHabits() {
     return `<div class="streak-day ${done ? 'done' : ''} ${isToday ? 'today' : ''}">${label}</div>`
   }).join('')
 
+  let gentle = ''
+  if (streak > 0) {
+    gentle = `
+      <div class="gentle-card alive">
+        <h3>🔥 ${streak} ${dayWord(streak)} in a row</h3>
+        <p>Check in today to keep the chain alive.</p>
+      </div>
+    `
+  } else if (since !== null && since >= 2) {
+    gentle = `
+      <div class="gentle-card paused">
+        <h3>You missed a few days</h3>
+        <p>Your previous progress is safe — best streak was <strong>${bestStreak}</strong> ${dayWord(bestStreak)}. Come back when you're ready.</p>
+        <button class="btn" id="focus-today">Come back today →</button>
+      </div>
+    `
+  }
+
   const list = habits.length === 0
     ? `<div class="empty-state"><div class="emoji">🌿</div><p>Add a habit and check it off each day.</p></div>`
     : `<div class="item-list">${habits.map(h => {
         const done = h.history?.includes(t)
-        const streak = calcHabitStreak(h)
+        const hs = calcHabitStreak(h)
         return `
           <div class="item ${done ? 'done' : ''}">
             <div class="checkbox ${done ? 'checked' : ''}" data-action="toggle" data-id="${h.id}">${done ? '✓' : ''}</div>
             <div class="item-content">
               <div class="item-title">${escapeHtml(h.title)}</div>
-              <div class="item-meta">Streak: <strong>${streak}</strong> ${dayWord(streak)}${done ? ' · done today' : ''}</div>
+              <div class="item-meta">Streak: <strong>${hs}</strong> ${dayWord(hs)}${done ? ' · done today' : ''}</div>
             </div>
             <div class="item-actions">
               <button class="btn btn-sm btn-ghost" data-action="delete" data-id="${h.id}">Delete</button>
@@ -548,17 +837,10 @@ function pageHabits() {
     <div class="page-header">
       <div>
         <h1>🔥 Habits</h1>
-        <p class="subtitle">Check in today — your streak grows</p>
+        <p class="subtitle">Progress stays even if you skip a day</p>
       </div>
     </div>
-    <div class="streak-banner">
-      <div class="streak-fire">🔥</div>
-      <div class="streak-info">
-        <h3>${overall > 0 ? `${overall} ${dayWord(overall)} in a row` : 'No streak yet'}</h3>
-        <p>${overall > 0 ? 'Don’t miss a day' : 'Check a habit today to start'}</p>
-      </div>
-      <div class="streak-points">⭐ ${points}</div>
-    </div>
+    ${gentle}
     <div class="streak-calendar">${calendar}</div>
     <div class="form-row">
       <input type="text" id="habit-input" class="input" placeholder="e.g. Read for 10 minutes">
@@ -569,6 +851,10 @@ function pageHabits() {
 }
 
 function bindHabits() {
+  document.getElementById('focus-today')?.addEventListener('click', () => {
+    document.getElementById('habit-input')?.focus()
+  })
+
   document.getElementById('add-habit')?.addEventListener('click', () => {
     const input = document.getElementById('habit-input')
     const title = input.value.trim()
@@ -583,6 +869,7 @@ function bindHabits() {
   document.getElementById('habit-input')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') document.getElementById('add-habit').click()
   })
+
   document.querySelectorAll('[data-action]').forEach(el => {
     el.addEventListener('click', () => {
       const id = +el.dataset.id
@@ -599,9 +886,9 @@ function bindHabits() {
         } else {
           h.history.push(today())
           saveHabits(habits)
-          const streak = calcHabitStreak(h)
+          const hs = calcHabitStreak(h)
           const pts = awardDailyActivity(15)
-          showToast(streak > 1 ? `Streak: ${streak} 🔥 · ${pts} ⭐` : `Streak started · ${pts} ⭐`)
+          showToast(hs > 1 ? `Streak: ${hs} 🔥 · ${pts} ⭐` : `Nice start · ${pts} ⭐`)
         }
         renderPage()
       } else if (el.dataset.action === 'delete') {
@@ -637,7 +924,7 @@ function pageJournal() {
     <div class="page-header">
       <div>
         <h1>📓 Journal</h1>
-        <p class="subtitle">Writing also keeps your streak going</p>
+        <p class="subtitle">Writing also keeps your progress alive</p>
       </div>
     </div>
     <div style="margin-bottom:24px">
@@ -676,36 +963,70 @@ function bindJournal() {
   })
 }
 
+/* ----- Journey + Path ----- */
 function pageJourney() {
   const days = daysWithVector()
   const actions = totalActions()
   const checks = getHabits().reduce((s, h) => s + (h.history?.length || 0), 0)
   const goalsDone = getCompletedGoals().length
   const journalCount = getJournal().length
-  const overall = getOverallStreak()
+  const bestStreak = getBestStreak()
   const points = getProfile().points || 0
   const achievements = getAchievements()
+  const months = getPathMonths()
+
+  const pathHtml = months.map(m => `
+    <div class="path-month">
+      <div class="month-name">${m.label} · ${m.activeCount} active ${dayWord(m.activeCount)}</div>
+      <div class="path-dots">
+        ${m.dots.map(d => {
+          if (d.future) return ''
+          const cls = d.active ? (m.activeCount >= 15 ? 'strong' : 'active') : ''
+          return `<div class="path-dot ${cls}"></div>`
+        }).join('')}
+      </div>
+    </div>
+  `).join('')
+
+  const monthsAgo = months.length
+  const intro = monthsAgo <= 1
+    ? 'Your path is just beginning. Each day you show up adds a dot.'
+    : `${monthsAgo} months ago you started. Every filled dot is a day you moved forward.`
 
   return `
     <div class="page-header">
       <div>
-        <h1>🛤️ Your journey</h1>
-        <p class="subtitle">Your full progress story</p>
+        <h1>🛤️ My path</h1>
+        <p class="subtitle">The story of your growth — nothing is erased</p>
       </div>
     </div>
+
     <div class="journey-hero">
       <h2>With Vector for</h2>
       <div class="big-number">${days}</div>
       <div class="big-label">${dayWord(days)}</div>
     </div>
-    <div class="journey-stats">
-      <div class="journey-stat"><div class="num">${actions}</div><div class="lbl">actions</div></div>
-      <div class="journey-stat"><div class="num">${checks}</div><div class="lbl">habit check-ins</div></div>
-      <div class="journey-stat"><div class="num">${goalsDone}</div><div class="lbl">goals done</div></div>
-      <div class="journey-stat"><div class="num">${journalCount}</div><div class="lbl">journal entries</div></div>
-      <div class="journey-stat"><div class="num">${overall}</div><div class="lbl">day streak</div></div>
-      <div class="journey-stat"><div class="num">${points}</div><div class="lbl">points ⭐</div></div>
+
+    <div class="journey-stats" style="margin-bottom:28px">
+      <div class="stat-card"><div class="value">${actions}</div><div class="label">total actions</div></div>
+      <div class="stat-card"><div class="value">${checks}</div><div class="label">habit check-ins</div></div>
+      <div class="stat-card"><div class="value">${goalsDone}</div><div class="label">goals done</div></div>
+      <div class="stat-card"><div class="value">${journalCount}</div><div class="label">journal entries</div></div>
+      <div class="stat-card"><div class="value">${bestStreak}</div><div class="label">best streak</div></div>
+      <div class="stat-card"><div class="value">${points}</div><div class="label">points ⭐</div></div>
     </div>
+
+    <div class="section-title">My path</div>
+    <p class="path-intro">${intro}</p>
+    <div class="path-section">
+      ${pathHtml || '<p style="color:var(--text-muted)">No history yet.</p>'}
+      <div class="path-legend">
+        <span><i class="lg-active"></i> Active day</span>
+        <span><i class="lg-strong"></i> Strong month</span>
+        <span><i class="lg-empty"></i> Quiet day</span>
+      </div>
+    </div>
+
     <div class="section-title">Achievements</div>
     <div class="achievements">
       ${achievements.map(a => `
@@ -716,32 +1037,28 @@ function pageJourney() {
 }
 
 function pageProgress() {
+  const stats = get30DayStats()
   const habits = getHabits()
   const journal = getJournal()
   const goals = getGoals()
   const monthAgo = daysAgo(30)
-  let checksLast30 = 0, checksBefore = 0
-  habits.forEach(h => (h.history || []).forEach(d => {
-    if (d >= monthAgo) checksLast30++
-    else checksBefore++
-  }))
-  const journalLast30 = journal.filter(e => e.date.slice(0, 10) >= monthAgo).length
-  const journalBefore = journal.length - journalLast30
-  const goalsLast30 = goals.filter(g => g.completed && g.completedAt && g.completedAt.slice(0, 10) >= monthAgo).length
+  let checksBefore = 0
+  habits.forEach(h => (h.history || []).forEach(d => { if (d < monthAgo) checksBefore++ }))
+  const journalBefore = journal.filter(e => e.date.slice(0, 10) < monthAgo).length
   const goalsBefore = goals.filter(g => g.completed && (!g.completedAt || g.completedAt.slice(0, 10) < monthAgo)).length
-  const hasData = checksLast30 + journalLast30 + goalsLast30 + checksBefore + journalBefore + goalsBefore > 0
+  const hasData = stats.total30 + checksBefore + journalBefore + goalsBefore > 0
 
   return `
     <div class="page-header">
       <div>
         <h1>📈 Progress</h1>
-        <p class="subtitle">How you’ve changed over the last 30 days</p>
+        <p class="subtitle">Last 30 days vs earlier</p>
       </div>
     </div>
     ${!hasData ? `
       <div class="empty-state">
         <div class="emoji">🌱</div>
-        <p>Not enough data yet. Keep checking habits and goals — comparison will appear here.</p>
+        <p>Not enough data yet. Keep going — comparison will appear here.</p>
       </div>
     ` : `
       <div class="compare-grid">
@@ -753,16 +1070,17 @@ function pageProgress() {
         </div>
         <div class="compare-card after">
           <h3>✨ Last 30 days</h3>
-          <div class="compare-row"><span>Habit check-ins</span><span class="val">${checksLast30}</span></div>
-          <div class="compare-row"><span>Journal</span><span class="val">${journalLast30}</span></div>
-          <div class="compare-row"><span>Goals</span><span class="val">${goalsLast30}</span></div>
+          <div class="compare-row"><span>Habit check-ins</span><span class="val">${stats.checks30}</span></div>
+          <div class="compare-row"><span>Journal</span><span class="val">${stats.journal30}</span></div>
+          <div class="compare-row"><span>Goals</span><span class="val">${stats.goals30}</span></div>
         </div>
       </div>
       <div class="delta-card">
         <h3>Your progress this month</h3>
-        <div class="delta-item"><span class="plus">+${checksLast30}</span> check-ins</div>
-        <div class="delta-item"><span class="plus">+${journalLast30}</span> journal entries</div>
-        <div class="delta-item"><span class="plus">+${goalsLast30}</span> goals completed</div>
+        <div class="delta-item"><span class="plus">+${stats.checks30}</span> check-ins</div>
+        <div class="delta-item"><span class="plus">+${stats.journal30}</span> journal entries</div>
+        <div class="delta-item"><span class="plus">+${stats.goals30}</span> goals completed</div>
+        <div class="delta-item"><span class="plus">${stats.activityPct > 0 ? '+' : ''}${stats.activityPct}%</span> activity change</div>
       </div>
     `}
   `
@@ -776,8 +1094,8 @@ function pageAnalytics() {
     { value: habits.length, label: 'Habits' },
     { value: totalChecks, label: 'Total check-ins' },
     { value: habits.filter(h => h.history?.includes(t)).length, label: 'Done today' },
-    { value: getOverallStreak(), label: 'Day streak' },
-    { value: habits.reduce((m, h) => Math.max(m, calcHabitStreak(h)), 0), label: 'Best habit streak' },
+    { value: getOverallStreak(), label: 'Current streak' },
+    { value: getBestStreak(), label: 'Best streak ever' },
     { value: getActiveGoals().length, label: 'Active goals' },
     { value: getCompletedGoals().length, label: 'Goals completed' },
     { value: getJournal().length, label: 'Journal entries' },
@@ -789,7 +1107,7 @@ function pageAnalytics() {
     <div class="page-header">
       <div>
         <h1>📊 Analytics</h1>
-        <p class="subtitle">All the numbers in one place</p>
+        <p class="subtitle">All numbers — no judgment</p>
       </div>
     </div>
     <div class="stats-grid">
@@ -880,4 +1198,4 @@ document.addEventListener('click', e => {
   }
 })
 
-console.log('Vector v1.4 · English')
+console.log('Vector v1.5 · progress over pressure')

@@ -1,15 +1,13 @@
-# Vector
+# Vector v1.5
 
-A calm self-growth app — goals, habits, journal, streaks, and gentle progress.
+A calm self-growth app focused on progress, not pressure.
 
-## Features
+## What's new
 
-- Goals (complete once, soft-delete with undo)
-- Daily habits with Duolingo-style streaks
-- Journal
-- Points & achievements
-- Progress & analytics
-- Firebase Auth (email + Google)
+- Home screen centered on **30-day progress**
+- **Weekly summary** (especially on Sundays)
+- **Gentle streaks** — skips don't erase your history
+- **My path** — month-by-month activity timeline
 
 ## Run
 
@@ -19,11 +17,3 @@ npm run dev
 ```
 
 Put your Firebase config in `src/firebase.js`.
-
-## Deploy (Vercel)
-
-- Framework: Vite
-- Build: `npx vite build`
-- Output: `dist`
-- Install: `npm install`
-- Node: 20.x

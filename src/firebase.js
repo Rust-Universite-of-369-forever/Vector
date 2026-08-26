@@ -1,3 +1,8 @@
+/**
+ * Paste your Firebase config from the Console.
+ * Enable Email/Password and Google in Authentication → Sign-in method.
+ */
+
 import { initializeApp } from 'firebase/app'
 import { getAuth } from 'firebase/auth'
 import { getFirestore } from 'firebase/firestore'
