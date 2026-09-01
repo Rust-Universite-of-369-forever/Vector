@@ -1,13 +1,11 @@
-# Vector v1.5
+# Vector 2.1
 
-A calm self-growth app focused on progress, not pressure.
+Calm self-growth app with event logging and CSV export.
 
-## What's new
+## New in 2.1
 
-- Home screen centered on **30-day progress**
-- **Weekly summary** (especially on Sundays)
-- **Gentle streaks** — skips don't erase your history
-- **My path** — month-by-month activity timeline
+- Action event log (localStorage)
+- Export events / habits / goals / journal as CSV from Profile
 
 ## Run
 
