@@ -1,3 +1,4 @@
+import './analytics.js'
 import './style.css'
 import { auth } from './firebase.js'
 import {
