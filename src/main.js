@@ -10,18 +10,6 @@ import {
   signOut,
   updateProfile
 } from 'firebase/auth'
-import { Analytics } from "@vercel/analytics/next";
-
-export default function RootLayout({ children }) {
-  return (
-    <html lang="ru">
-      <body>
-        {children}
-        <Analytics /> 
-      </body>
-    </html>
-  );
-}
 
 function storageKey(base, uid) {
   return uid ? `vector_${base}_${uid}` : `vector_${base}`
