@@ -9,8 +9,7 @@
     "preview": "vite preview"
   },
   "devDependencies": {
-    "vite": "^5.4.0",
-    "@vercel/analytics": "^1.x.x"
+    "vite": "^5.4.0"
   },
   "dependencies": {
     "@vercel/analytics": "^2.0.1",

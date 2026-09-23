@@ -1,17 +1,22 @@
-# Vector 2.1
+# Vector
 
-Calm self-growth app with event logging and CSV export.
+Vector is a Vite + Firebase self-development app for goals, habits, journaling and progress tracking.
 
-## New in 2.1
-
-- Action event log (localStorage)
-- Export events / habits / goals / journal as CSV from Profile
-
-## Run
+## Run locally
 
 ```bash
 npm install
 npm run dev
 ```
 
-Put your Firebase config in `src/firebase.js`.
+## Production build
+
+```bash
+npm run build
+```
+
+## Architecture
+
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the module structure and dependency rules.
+
+The refactor keeps the existing `localStorage` key format, so current user data remains compatible.
