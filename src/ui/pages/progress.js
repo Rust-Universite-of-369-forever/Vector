@@ -1,14 +1,14 @@
 import { getGoals, getHabits, getJournal } from '../../core/repository.js'
 import { get30DayStats } from '../../services/progress.js'
-import { daysAgo } from '../../utils/date.js'
+import { dayKeyFromISO, daysAgo } from '../../utils/date.js'
 
 export function renderProgressPage() {
   const stats = get30DayStats()
   const monthAgo = daysAgo(30)
   let checksBefore = 0
   getHabits().forEach(habit => (habit.history || []).forEach(day => { if (day < monthAgo) checksBefore++ }))
-  const journalBefore = getJournal().filter(entry => entry.date.slice(0, 10) < monthAgo).length
-  const goalsBefore = getGoals().filter(goal => goal.completed && (!goal.completedAt || goal.completedAt.slice(0, 10) < monthAgo)).length
+  const journalBefore = getJournal().filter(entry => dayKeyFromISO(entry.date) < monthAgo).length
+  const goalsBefore = getGoals().filter(goal => goal.completed && (!goal.completedAt || dayKeyFromISO(goal.completedAt) < monthAgo)).length
   const hasData = stats.total30 + checksBefore + journalBefore + goalsBefore > 0
 
   return `

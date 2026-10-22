@@ -31,3 +31,14 @@ The localStorage key format remains `vector_<entity>_<uid>`, so existing local d
 ## Dependency direction
 
 Pages depend on repositories/services/utils. Services can depend on core and utils. Core does not depend on UI. `main.js` only wires the application together.
+
+## Dates
+
+All "days" are local calendar dates (`YYYY-MM-DD`) built by `utils/date.js` (`toDayKey`, `addDays`, `dayKeyFromISO`).
+Timestamps (`createdAt`, `completedAt`, journal `date`) stay ISO strings and are converted to a local day only when
+statistics are calculated. Habit `history` entries written by earlier versions are UTC day keys and are left untouched.
+
+## Theme
+
+Dark theme is the default and is defined by tokens in `:root` in `style.css`. The previous light palette is kept in
+`:root[data-theme="light"]`. New UI must use tokens (`var(--...)`) instead of literal colours.

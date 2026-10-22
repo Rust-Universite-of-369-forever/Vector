@@ -1,12 +1,12 @@
 import { getActiveGoals, getCompletedGoals, getGoals, getHabits, getJournal, getProfile, saveProfile } from '../core/repository.js'
-import { daysAgo, lastNDays, today } from '../utils/date.js'
+import { addDays, dayKeyFromISO, daysAgo, lastNDays, toDayKey, today } from '../utils/date.js'
 
 export function getActiveDays() {
   const activeDays = new Set()
   getHabits().forEach(habit => (habit.history || []).forEach(day => activeDays.add(day)))
-  getJournal().forEach(entry => activeDays.add(entry.date.slice(0, 10)))
+  getJournal().forEach(entry => activeDays.add(dayKeyFromISO(entry.date)))
   getCompletedGoals().forEach(goal => {
-    if (goal.completedAt) activeDays.add(goal.completedAt.slice(0, 10))
+    if (goal.completedAt) activeDays.add(dayKeyFromISO(goal.completedAt))
   })
   return activeDays
 }
@@ -25,9 +25,7 @@ export function getOverallStreak() {
 
   while (allDays.has(expected)) {
     streak++
-    const date = new Date(expected)
-    date.setDate(date.getDate() - 1)
-    expected = date.toISOString().slice(0, 10)
+    expected = addDays(expected, -1)
   }
   return streak
 }
@@ -65,9 +63,7 @@ export function calcHabitStreak(habit) {
   for (const day of sorted) {
     if (day === expected) {
       streak++
-      const date = new Date(expected)
-      date.setDate(date.getDate() - 1)
-      expected = date.toISOString().slice(0, 10)
+      expected = addDays(expected, -1)
     } else if (day < expected) {
       break
     }
@@ -111,15 +107,15 @@ export function get30DayStats() {
     else if (day >= previousStart) checksPrev++
   }))
 
-  const journal30 = journal.filter(entry => entry.date.slice(0, 10) >= monthAgo).length
+  const journal30 = journal.filter(entry => dayKeyFromISO(entry.date) >= monthAgo).length
   const journalPrev = journal.filter(entry => {
-    const day = entry.date.slice(0, 10)
+    const day = dayKeyFromISO(entry.date)
     return day >= previousStart && day < monthAgo
   }).length
-  const goals30 = goals.filter(goal => goal.completed && goal.completedAt && goal.completedAt.slice(0, 10) >= monthAgo).length
+  const goals30 = goals.filter(goal => goal.completed && goal.completedAt && dayKeyFromISO(goal.completedAt) >= monthAgo).length
   const goalsPrev = goals.filter(goal => {
     if (!goal.completed || !goal.completedAt) return false
-    const day = goal.completedAt.slice(0, 10)
+    const day = dayKeyFromISO(goal.completedAt)
     return day >= previousStart && day < monthAgo
   }).length
 
@@ -140,8 +136,8 @@ export function getWeekRange() {
   const end = new Date(start)
   end.setDate(start.getDate() + 6)
   return {
-    start: start.toISOString().slice(0, 10),
-    end: end.toISOString().slice(0, 10),
+    start: toDayKey(start),
+    end: toDayKey(end),
     isSunday: day === 0
   }
 }
@@ -160,10 +156,10 @@ export function getWeekStats(start, end) {
   })
 
   const journalCount = journal.filter(entry => {
-    const day = entry.date.slice(0, 10)
+    const day = dayKeyFromISO(entry.date)
     return day >= start && day <= end
   }).length
-  const goalsCount = goals.filter(goal => goal.completed && goal.completedAt && goal.completedAt.slice(0, 10) >= start && goal.completedAt.slice(0, 10) <= end).length
+  const goalsCount = goals.filter(goal => goal.completed && goal.completedAt && dayKeyFromISO(goal.completedAt) >= start && dayKeyFromISO(goal.completedAt) <= end).length
   const reading = Object.entries(habitTitles).filter(([title]) => /read|book/i.test(title)).reduce((sum, [, count]) => sum + count, 0)
   const sport = Object.entries(habitTitles).filter(([title]) => /sport|train|gym|run|yoga|workout/i.test(title)).reduce((sum, [, count]) => sum + count, 0)
   return { checks, journalCount, goalsCount, totalActions: checks + journalCount + goalsCount, reading, sport }
@@ -185,8 +181,8 @@ export function getDailyActionCounts() {
   return lastNDays(7).map(day => {
     let count = 0
     getHabits().forEach(habit => { if (habit.history?.includes(day)) count++ })
-    getJournal().forEach(entry => { if (entry.date.slice(0, 10) === day) count++ })
-    getCompletedGoals().forEach(goal => { if (goal.completedAt?.slice(0, 10) === day) count++ })
+    getJournal().forEach(entry => { if (dayKeyFromISO(entry.date) === day) count++ })
+    getCompletedGoals().forEach(goal => { if (dayKeyFromISO(goal.completedAt) === day) count++ })
     return {
       day,
       count,
@@ -214,7 +210,7 @@ export function getPathMonths() {
     for (let day = 1; day <= daysInMonth; day++) {
       const dateStr = `${key}-${String(day).padStart(2, '0')}`
       if (dateStr > today()) break
-      if (dateStr < (profile.createdAt || '').slice(0, 10)) {
+      if (dateStr < (dayKeyFromISO(profile.createdAt) || '')) {
         dayDots.push({ active: false, future: true })
         continue
       }
